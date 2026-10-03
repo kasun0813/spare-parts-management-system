@@ -9,7 +9,7 @@ autohub/
 └── docs/
     ├── TESTING_GUIDE.md   step-by-step build & test order (start here)
     ├── DESIGN_PATTERNS.md design patterns used and where to find them
-    └── api_test.py        automated API test (392 checks)
+    └── api_test.py        automated API test (421 checks)
 ```
 
 ---
@@ -86,6 +86,33 @@ Every user can add, change or remove a profile picture under **My profile** (JPG
 Pictures are stored in the database (`profile_pictures` table), so no file server or Cloudinary account is
 needed, and are served at `GET /api/users/{id}/avatar`. They appear in the header, next to reviews and next to
 feedback on the home page and the staff pages.
+
+### Forgot password (6-digit code by email)
+*Login → Forgot password?* → enter the email → a 6-digit code is emailed → enter the code → choose a new password
+(the user is then logged in). The code is valid for 10 minutes, a new one can be requested after 60 seconds, and it
+stops working after 5 wrong tries. Only a hash of the code is stored (`password_reset_otps` table). The page gives the
+same answer for unknown emails, so it cannot be used to find out who has an account.
+
+**Sending real emails (Gmail):**
+1. Use the shop's Gmail account. In that Google account turn on **2-Step Verification**
+   (myaccount.google.com → Security).
+2. Then open **myaccount.google.com/apppasswords**, create an app password called "AutoHub" and copy the 16 letters.
+3. In `backend/src/main/resources/application.properties` fill in
+   `spring.mail.username=yourshop@gmail.com` and `spring.mail.password=abcdefghijklmnop` (the app password, without spaces),
+   or set the environment variables `MAIL_USERNAME` / `MAIL_PASSWORD`. Restart the backend.
+
+While `spring.mail.username` is empty no email is sent: the code is printed in the backend console
+(`PASSWORD RESET CODE for … : 123456`), so the flow can still be tested.
+
+### Contact us
+The storefront has a **Contact** page (menu and footer). Visitors – logged in or not – choose a topic
+(order, spare part enquiry, returns & warranty, payment, other), optionally give an order number, and write a message.
+* The message is emailed to the **same Gmail account that sends the emails** (`spring.mail.username`), and Reply goes
+  straight to the customer. The customer gets a confirmation copy, and sales staff get an in-app notification.
+  To receive them in a different inbox, set `app.contact.to=other@gmail.com` in `application.properties`.
+* Uses the same email account as Forgot password (`spring.mail.*`); without it the message is printed in the console.
+* Spam protection: a hidden "website" field (bots fill it in) and at most 5 messages per 10 minutes per visitor;
+  messages with banned words are refused (ContentFilter).
 
 ### Bank transfer (with bank slip)
 Admin → **Settings → Payments**: switch bank transfer on and enter the bank, branch, account name and number.
@@ -182,9 +209,9 @@ Foreign keys are handled in the service layer, so a delete never fails with an S
 ## 4. Validation
 
 * **Request validation** – every request body is a Java `record` with Bean Validation
-  (`@NotBlank`, `@Size`, `@ValidEmail`, `@GmailAddress`, `@Pattern`, `@DecimalMin`, `@FutureOrPresent`…).
-  E-mails use one strict rule (`@ValidEmail`, e.g. rejects `a@b`, `a..b@x.com`); customer sign-up only
-  accepts Gmail (`@GmailAddress`). The React forms use the same rules (`src/utils/validation.js`).
+  (`@NotBlank`, `@Size`, `@Pattern`, `@DecimalMin`, `@FutureOrPresent`…).
+  E-mails use one strict rule, written in `auth/dto/LoginRequest` (`EMAIL_REGEX`, e.g. rejects `a@b`, `a..b@x.com`)
+  and reused by every form with an email; customer sign-up only accepts Gmail (`auth/dto/RegisterRequest`, `GMAIL_REGEX`). The React forms use the same rules (`src/utils/validation.js`).
   Errors come back as `400` with a `fieldErrors` map; the forms show them under each field.
 * **Business validation** – in the services, e.g. unique SKU / email / coupon code, stock can never go
   negative, order status can only move PLACED → PROCESSING → SHIPPED → DELIVERED, discount ≤ 90 %,
@@ -201,26 +228,33 @@ Error response format:
 
 ## 5. Backend structure
 
-Package by feature – each folder holds its entities, repository, service, controller and DTOs:
+Package by feature, and inside every feature the same layers:
+`controller/` (REST endpoints) · `service/` (business rules) · `repository/` (database access) ·
+`entity/` (JPA tables and enums) · `dto/` (request / response bodies) – plus a folder for the design pattern of that function.
 
 ```
 com.autohublanka
-├── auth          login (password / Google), register, Google token check
-├── user          users, profile
-├── catalog       categories, spare parts, vehicles, fitments
-├── inventory     stock records, stock movements, StockService (the only place stock changes) + observer/
-├── procurement   suppliers, purchase requests, purchase orders, goods receipts, supplier portal + observer/
-├── sales         cart, checkout, orders, payments (payment/ = strategies), automatic invoices
-├── wishlist      customers' saved parts
-├── marketing     promotions, discounts, coupons, pricing (price/ = decorators)
-├── support       reviews, feedback (ContentFilter singleton), return & warranty claims (resolution/ = factory)
-├── notification  in-app notifications
-├── activity      activity log (written after every change + log-ins)
-├── report        admin reports
-├── settings      system settings
-├── dashboard     summary numbers
-├── security      JWT, Spring Security config, CurrentUser helper
-└── common        BaseEntity, validation (@ValidEmail, @GmailAddress), exceptions, DataSeeder, SchemaCleanup
+├── auth           controller · service (AuthService, PasswordResetService) · repository · entity
+│                  (PasswordResetOtp) · dto (LoginRequest = email rule, RegisterRequest = Gmail rule, forgot-password) · google
+├── user           controller · service (users, profile pictures) · repository · entity (User, Role…) · dto
+├── catalog        controller · service · repository · entity (Category, SparePart, Vehicle, Fitment) · dto
+├── inventory      controller · service (StockService = the only place stock changes) · repository · entity · dto
+│                  · observer/        ← Function 1, Observer
+├── procurement    controller · service · repository · entity (Supplier, PurchaseRequest, PurchaseOrder, GoodsReceipt) · dto
+│                  · observer/        ← Function 3, Observer
+├── sales          controller · service · repository · entity (Wishlist, Cart, Order, Payment, BankSlip, Invoice) · dto
+│                  · strategy/        ← Function 2, Strategy
+├── marketing      controller · service (incl. PricingService, DateRules) · repository · entity · dto
+│                  · decorator/       ← Function 6, Decorator
+├── support        controller · service · repository · entity (Review, Feedback, Rma) · dto
+│                  · ContactService / ContactController (Contact us form)
+│                  · singleton/ (ContentFilter)  ← Function 4, Singleton
+│                  · factory/                    ← Function 5, Factory
+├── notification   controller · service (in-app notifications, EmailService) · repository · entity · dto
+├── dashboard      admin area – controller (Dashboard, ActivityLog, Report, Settings) · service · repository · entity
+│                  (ActivityLog, SystemSetting) · dto · config (activity-log interceptor)
+├── security       SecurityConfig, JwtAuthFilter, JwtService, AppUserDetailsService, CurrentUser
+└── common         config (DataSeeder, FrontendConfig, SchemaCleanup) · entity (BaseEntity) · exception · util (Text, FileTypes)
 ```
 
 ## 6. Frontend structure
@@ -253,8 +287,11 @@ With the backend running on an **empty** database:
 ```bash
 python docs/api_test.py
 ```
-It runs 392 checks (every CRUD operation, validation rule, delete rule, the approval / goods receipt / invoice
+It runs 421 checks (every CRUD operation, validation rule, delete rule, the approval / goods receipt / invoice
 workflows, wishlist, activity log, reports, settings and the design patterns) and removes its data again.
+The forgot-password code checks read the code from the backend console, so they run only when email is not configured
+and the console output is saved to a file: `AUTOHUB_LOG=backend.log python docs/api_test.py` (without it, 17 of the
+checks are skipped).
 
 ## 8. Design patterns
 
@@ -264,8 +301,8 @@ Details and class diagrams are in **docs/DESIGN_PATTERNS.md**.
 | Function | Pattern | Where |
 |---|---|---|
 | Inventory Management | Observer | `inventory/observer/` – stock change → low-stock alert, reorder suggestion, stock log |
-| Sales & Order Management | Strategy | `sales/payment/` – card, cash on delivery, bank transfer |
+| Sales & Order Management | Strategy | `sales/strategy/` – card, cash on delivery, bank transfer |
 | Supplier Record Management | Observer | `procurement/observer/` – PO status change → request status, procurement / supplier notices, expected stock |
-| Feedback & Review Management | Singleton | `support/ContentFilter` – one shared bad-word filter |
-| Warranty & Return Management | Factory | `support/resolution/` – refund vs replacement |
-| Marketing & Promotion Management | Decorator | `marketing/price/` – base price → discount → coupon |
+| Feedback & Review Management | Singleton | `support/singleton/ContentFilter` – one shared bad-word filter |
+| Warranty & Return Management | Factory | `support/factory/` – refund vs replacement |
+| Marketing & Promotion Management | Decorator | `marketing/decorator/` – base price → discount → coupon |
