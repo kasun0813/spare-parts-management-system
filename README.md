@@ -1,1 +1,0 @@
-# spare-parts-management-system
